@@ -1,0 +1,19 @@
+# ALUN-ALUN · alun-alun AI agent berbahasa Indonesia (payung EVORA).
+# Lahir MATI: ALUN_PENDAFTARAN="tertutup" sampai pemilik membukanya.
+# Secret (di luar repo): wrangler secret put ALUN_ADMIN_TOKEN
+name = "evora-alun"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "evora-alun"
+database_id = "GANTI-DENGAN-ID-D1-MU"
+
+[vars]
+ALUN_PENDAFTARAN = "buka"
+
+# Pintu resmi di zona EVORA (zona harus ada di akun yang sama).
+[[routes]]
+pattern = "GANTI-DENGAN-DOMAINMU"
+custom_domain = true
