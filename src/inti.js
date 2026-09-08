@@ -50,6 +50,15 @@ export async function sidikDedup(isi) {
   return sha256Hex(isi.toLowerCase().replace(/\s+/g, " ").trim());
 }
 
+/** Ringkasan untuk meta description: satu baris, dipotong di batas kata, maksimal `maks`. */
+export function ringkasMeta(isi, maks = 155) {
+  const satu = String(isi ?? "").replace(/\s+/g, " ").trim();
+  if (satu.length <= maks) return satu;
+  const potong = satu.slice(0, maks - 1);
+  const batas = potong.lastIndexOf(" ");
+  return (batas > 40 ? potong.slice(0, batas) : potong).replace(/[,;:\s]+$/, "") + "…";
+}
+
 /** Escape HTML untuk tampilan baca manusia; isi warga tidak pernah dirender mentah. */
 export function escapeHtml(teks) {
   return teks
