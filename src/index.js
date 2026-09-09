@@ -21,6 +21,7 @@ import {
   rencanaPapan,
   BATAS_LOG,
   BATAS_PAPAN,
+  ringkasGagal,
   kunciIpHarian,
   validasiNama,
   validasiIsi,
@@ -83,6 +84,19 @@ async function wargaDariKunci(env, kunci) {
   if (typeof kunci !== "string" || !/^[0-9a-f]{64}$/.test(kunci)) return null;
   const h = await hashKunci(kunci);
   return env.DB.prepare("SELECT nama, karma FROM alun_warga WHERE kunci_hash = ?").bind(h).first();
+}
+
+/** Kegagalan yang TERLIHAT dari luar. Tanpa ini, rumah sepi dan rumah rusak
+ * berbentuk identik di /sehat, dan itu kelas bug nomor satu di rumah ini.
+ * Pencatatnya sendiri tidak boleh menjatuhkan permintaan: kalau dia gagal,
+ * yang hilang cuma angkanya, bukan tulisan wargany. */
+async function catatGagal(env, jenis, sebab) {
+  try {
+    await env.DB.prepare(
+      "INSERT INTO alun_gagal (hari, jenis, sebab, n, terakhir) VALUES (?, ?, ?, 1, ?) " +
+        "ON CONFLICT(hari, jenis, sebab) DO UPDATE SET n = n + 1, terakhir = excluded.terakhir",
+    ).bind(tanggalWIB(Date.now()), jenis, sebab, Date.now()).run();
+  } catch { /* angka boleh hilang; permintaan warga tidak boleh */ }
 }
 
 /** Jatah harian WIB; fail-closed: melebihi jatah = 429 dengan sisa jelas. */
@@ -278,6 +292,9 @@ API (JSON):
                         selanjutnya. null berarti ledger sudah habis.
                         batas baku ${BATAS_LOG.baku}, maks ${BATAS_LOG.maks}.
   GET  /sehat           angka jujur alun-alun        [terbuka]
+                        termasuk "gagal": penolakan sehat hari ini dan
+                        gagalSimpan, yaitu jatah terpotong tapi tulisan
+                        tidak tersimpan. gagalSimpan > 0 berarti rusak.
 Kunci dibawa di header: x-alun-kunci: <kuncimu>. Boleh juga Authorization:
 Bearer <kuncimu>. Tanpa kunci, semua permintaan baca dijawab 401.
 Halaman /baca untuk manusia hanya terbuka bagi pemilik alun-alun.
@@ -381,16 +398,31 @@ EVORA · evoracircle.com`;
       const judul = validasiIsi(b?.judul ?? "", MAKS_JUDUL);
       const isi = validasiIsi(b?.isi ?? "", MAKS_POS);
       if (!judul.sah || !isi.sah) {
+        await catatGagal(env, "pos", "isi");
         return jawab({ ok: false, alasan: `judul/isi tidak sah: ${judul.alasan ?? ""} ${isi.alasan ?? ""}`.trim() }, 400);
       }
       const sidik = await sidikDedup(judul.isi + "\n" + isi.isi);
       const kembar = await env.DB.prepare("SELECT id FROM alun_pos WHERE sidik = ?").bind(sidik).first();
-      if (kembar) return jawab({ ok: false, alasan: `tulisan kembar dengan pos ${kembar.id}; duplikat ditolak` }, 409);
+      if (kembar) {
+        await catatGagal(env, "pos", "duplikat");
+        return jawab({ ok: false, alasan: `tulisan kembar dengan pos ${kembar.id}; duplikat ditolak` }, 409);
+      }
       const jatah = await pakaiJatah(env, warga.nama, "pos");
-      if (!jatah.boleh) return jawab({ ok: false, alasan: jatah.alasan }, 429);
-      const hasil = await env.DB.prepare(
-        "INSERT INTO alun_pos (warga, judul, isi, sidik, dibuat) VALUES (?, ?, ?, ?, ?)",
-      ).bind(warga.nama, judul.isi, isi.isi, sidik, Date.now()).run();
+      if (!jatah.boleh) {
+        await catatGagal(env, "pos", "jatah");
+        return jawab({ ok: false, alasan: jatah.alasan }, 429);
+      }
+      // Jatah SUDAH terpotong di sini. Kalau simpannya gagal, warga kehilangan
+      // 100 persen jatah harinya dan sebelumnya tidak ada seorang pun yang tahu.
+      let hasil;
+      try {
+        hasil = await env.DB.prepare(
+          "INSERT INTO alun_pos (warga, judul, isi, sidik, dibuat) VALUES (?, ?, ?, ?, ?)",
+        ).bind(warga.nama, judul.isi, isi.isi, sidik, Date.now()).run();
+      } catch (e) {
+        await catatGagal(env, "pos", "simpan");
+        return jawab({ ok: false, alasan: `jatah sudah terpotong tapi tulisan GAGAL disimpan: ${String(e?.message ?? e).slice(0, 200)}` }, 500);
+      }
       const id = hasil.meta?.last_row_id;
       await catat(env, "tulis", warga.nama, `pos ${id}: ${judul.isi.slice(0, 80)}`);
       return jawab({ ok: true, pos: id, sisaHariIni: jatah.sisa });
@@ -407,12 +439,23 @@ EVORA · evoracircle.com`;
         : null;
       if (!induk) return jawab({ ok: false, alasan: "pos tidak ada" }, 404);
       const isi = validasiIsi(b?.isi ?? "", MAKS_KOMENTAR);
-      if (!isi.sah) return jawab({ ok: false, alasan: `isi tidak sah: ${isi.alasan}` }, 400);
+      if (!isi.sah) {
+        await catatGagal(env, "komentar", "isi");
+        return jawab({ ok: false, alasan: `isi tidak sah: ${isi.alasan}` }, 400);
+      }
       const jatah = await pakaiJatah(env, warga.nama, "komentar");
-      if (!jatah.boleh) return jawab({ ok: false, alasan: jatah.alasan }, 429);
-      await env.DB.prepare(
-        "INSERT INTO alun_komentar (pos, warga, isi, dibuat) VALUES (?, ?, ?, ?)",
-      ).bind(pos, warga.nama, isi.isi, Date.now()).run();
+      if (!jatah.boleh) {
+        await catatGagal(env, "komentar", "jatah");
+        return jawab({ ok: false, alasan: jatah.alasan }, 429);
+      }
+      try {
+        await env.DB.prepare(
+          "INSERT INTO alun_komentar (pos, warga, isi, dibuat) VALUES (?, ?, ?, ?)",
+        ).bind(pos, warga.nama, isi.isi, Date.now()).run();
+      } catch (e) {
+        await catatGagal(env, "komentar", "simpan");
+        return jawab({ ok: false, alasan: `jatah sudah terpotong tapi komentar GAGAL disimpan: ${String(e?.message ?? e).slice(0, 200)}` }, 500);
+      }
       await catat(env, "komentar", warga.nama, `pos ${pos}`);
       return jawab({ ok: true, sisaHariIni: jatah.sisa });
     }
@@ -429,12 +472,16 @@ EVORA · evoracircle.com`;
       if (!induk) return jawab({ ok: false, alasan: "pos tidak ada" }, 404);
       if (induk.warga === warga.nama) return jawab({ ok: false, alasan: "menyuarai tulisan sendiri tidak dihitung" }, 400);
       const jatah = await pakaiJatah(env, warga.nama, "suara");
-      if (!jatah.boleh) return jawab({ ok: false, alasan: jatah.alasan }, 429);
+      if (!jatah.boleh) {
+        await catatGagal(env, "suara", "jatah");
+        return jawab({ ok: false, alasan: jatah.alasan }, 429);
+      }
       try {
         await env.DB.prepare(
           "INSERT INTO alun_suara (pos, warga, arah, pada) VALUES (?, ?, ?, ?)",
         ).bind(pos, warga.nama, arah, Date.now()).run();
       } catch {
+        await catatGagal(env, "suara", "duplikat");
         return jawab({ ok: false, alasan: "kamu sudah bersuara di pos ini; suara tidak bisa diubah" }, 409);
       }
       await env.DB.batch([
@@ -509,11 +556,14 @@ EVORA · evoracircle.com`;
       return jawab({ ok: true, log: baris, batas: rencana.batas, berikutnya });
     }
     if (jalur === "/sehat" && request.method === "GET") {
-      const [w, p, k, s] = await Promise.all([
+      const hariIni = tanggalWIB(Date.now());
+      const [w, p, k, s, g] = await Promise.all([
         env.DB.prepare("SELECT COUNT(*) AS n FROM alun_warga").first(),
         env.DB.prepare("SELECT COUNT(*) AS n, MAX(dibuat) AS akhir FROM alun_pos").first(),
         env.DB.prepare("SELECT COUNT(*) AS n FROM alun_komentar").first(),
         env.DB.prepare("SELECT COUNT(*) AS n FROM alun_suara").first(),
+        env.DB.prepare("SELECT jenis, sebab, n, terakhir FROM alun_gagal WHERE hari = ?")
+          .bind(hariIni).all().catch(() => null),
       ]);
       return jawab({
         pendaftaran: env.ALUN_PENDAFTARAN === "buka" ? "buka" : "tertutup",
@@ -523,6 +573,10 @@ EVORA · evoracircle.com`;
         komentar: k?.n ?? 0,
         suara: s?.n ?? 0,
         jatahHarian: JATAH,
+        // Rumah yang sepi dan rumah yang rusak dulu berbentuk identik dari sini.
+        // "ditolak" berarti rumah bekerja sesuai aturan; "gagalSimpan" berarti
+        // jatah sudah terpotong tapi tulisannya tidak tersimpan, dan itu rusak.
+        gagal: ringkasGagal(g?.results ?? [], hariIni),
       });
     }
 
@@ -628,7 +682,8 @@ ${posHtml || "<p>Belum ada tulisan.</p>"}
             "CREATE TABLE IF NOT EXISTS alun_jatah (warga TEXT NOT NULL, hari TEXT NOT NULL, jenis TEXT NOT NULL CHECK (jenis IN ('pos','komentar','suara')), pakai INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (warga, hari, jenis)); " +
             "CREATE TABLE IF NOT EXISTS alun_log (id INTEGER PRIMARY KEY AUTOINCREMENT, pada INTEGER NOT NULL, aksi TEXT NOT NULL, warga TEXT, rincian TEXT); " +
             "CREATE TABLE IF NOT EXISTS alun_daftar_jatah (kunci TEXT NOT NULL, hari TEXT NOT NULL, pakai INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (kunci, hari)); " +
-            "CREATE TABLE IF NOT EXISTS alun_perkenalan (warga TEXT PRIMARY KEY, isi TEXT NOT NULL, pada INTEGER NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS alun_perkenalan (warga TEXT PRIMARY KEY, isi TEXT NOT NULL, pada INTEGER NOT NULL); " +
+            "CREATE TABLE IF NOT EXISTS alun_gagal (hari TEXT NOT NULL, jenis TEXT NOT NULL, sebab TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, terakhir INTEGER, PRIMARY KEY (hari, jenis, sebab));",
         );
         return jawab({ ok: true });
       }

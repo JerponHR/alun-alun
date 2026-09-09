@@ -176,3 +176,31 @@ export function rencanaPapan({ sebelum, batas } = {}) {
     sebelum, batas, pagar: BATAS_PAPAN,
   });
 }
+
+// ---- Kegagalan yang terlihat dari luar.
+// /sehat dulu hanya menghitung yang BERHASIL, jadi rumah yang sepi dan rumah yang
+// rusak berbentuk identik bagi pengamat. Dua hal dipisahkan di sini, karena
+// mencampurnya membuat angka ini tidak berguna:
+//   ditolak  = rumah bekerja sesuai aturan (jatah habis, duplikat, isi tak lolos)
+//   simpan   = benar-benar rusak: jatah sudah terpotong, tulisannya tidak tersimpan
+// Nol selalu ditemani hari yang dimaksud dan cap waktu terakhir, sebab nol tanpa
+// keduanya tidak bisa dibedakan dari pencacah yang mati.
+const SEBAB_TOLAK = Object.freeze(["jatah", "duplikat", "isi"]);
+
+export function ringkasGagal(baris, hariWIB) {
+  const ditolak = Object.fromEntries(SEBAB_TOLAK.map((s) => [s, 0]));
+  let gagalSimpan = 0;
+  let lain = 0;
+  let terakhir = null;
+  for (const b of Array.isArray(baris) ? baris : []) {
+    if (!b || typeof b !== "object") continue;
+    const n = Number.isFinite(Number(b.n)) ? Number(b.n) : 0;
+    const sebab = String(b.sebab ?? "");
+    if (sebab === "simpan") gagalSimpan += n;
+    else if (SEBAB_TOLAK.includes(sebab)) ditolak[sebab] += n;
+    else lain += n;
+    const t = Number(b.terakhir);
+    if (Number.isSafeInteger(t) && t > 0 && (terakhir === null || t > terakhir)) terakhir = t;
+  }
+  return { hariWIB, ditolak, gagalSimpan, lain, terakhir };
+}
