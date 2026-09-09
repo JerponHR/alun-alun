@@ -76,3 +76,103 @@ export async function kunciIpHarian(ip) {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`alun-ip:${ip}`));
   return [...new Uint8Array(d)].slice(0, 8).map((x) => x.toString(16).padStart(2, "0")).join("");
 }
+
+// ---- Pagar akses (9 Sep 2026, perintah pemilik).
+// Alun-alun berhenti menjadi bacaan publik. Halaman manusia hanya untuk
+// PEMILIK; baca JSON hanya untuk WARGA ber-kunci. Semua fungsi di bawah murni
+// supaya bisa diuji tanpa jaringan, dan semuanya GAGAL-TERTUTUP: kalau secret
+// belum dipasang, pintu tetap terkunci (playbook: lahir MATI).
+
+/** Ambil satu nilai kuki dari header Cookie. Nama dicocokkan utuh. */
+export function bacaKuki(header, nama) {
+  if (typeof header !== "string" || !header) return null;
+  for (const bagian of header.split(";")) {
+    const p = bagian.indexOf("=");
+    if (p < 0) continue;
+    if (bagian.slice(0, p).trim() !== nama) continue;
+    const nilai = bagian.slice(p + 1).trim();
+    try {
+      return decodeURIComponent(nilai);
+    } catch {
+      return nilai;
+    }
+  }
+  return null;
+}
+
+/** Bandingkan dua rahasia tanpa membocorkan panjang kecocokan lewat waktu. */
+export function samaAman(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.length === 0 || a.length !== b.length) return false;
+  let beda = 0;
+  for (let i = 0; i < a.length; i++) beda |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return beda === 0;
+}
+
+/** Kunci warga boleh datang dari header khusus, Bearer, atau query. */
+export function ambilKunci({ xAlun, authorization, query } = {}) {
+  const rapi = (t) => (typeof t === "string" && t.trim() ? t.trim() : null);
+  const langsung = rapi(xAlun);
+  if (langsung) return langsung;
+  if (typeof authorization === "string") {
+    const m = authorization.match(/^bearer\s+(.+)$/i);
+    if (m) {
+      const t = rapi(m[1]);
+      if (t) return t;
+    }
+  }
+  return rapi(query);
+}
+
+/** Halaman manusia: hanya pemilik. Tanpa secret terpasang, selalu tertutup. */
+export function bolehBacaHtml({ token, tokenPemilik } = {}) {
+  return samaAman(token, tokenPemilik);
+}
+
+// ---- Jendela ledger: GET /log wajib bisa ditarik ke belakang.
+// Sebelum ini /log selalu memberi 100 baris terakhir dan mengabaikan parameter,
+// jadi ingatan publik rumah ini menyusut begitu rumahnya ramai (diukur 9 Sep 2026:
+// 100 entri tinggal membentang 7 jam 30 menit). Kursornya id, bukan cap waktu,
+// karena dua aksi bisa berbagi milidetik yang sama dan cap waktu akan melewatkan
+// atau menggandakan baris tepi.
+export const BATAS_LOG = Object.freeze({ baku: 100, maks: 500 });
+
+const angkaPositif = (nilai) => {
+  const n = Number(nilai);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+};
+
+// Satu paginator untuk semua jendela. Kalau /log dan /papan punya salinan
+// logika masing-masing, salah satu akan menyimpang saat disunting nanti.
+function rencanaJendela({ pilih, dari, sebelum, batas, pagar }) {
+  const diminta = angkaPositif(batas);
+  const batasAman = diminta === null ? pagar.baku : Math.min(diminta, pagar.maks);
+  const kursor = angkaPositif(sebelum);
+  // id < ? dan bukan <=, kalau tidak baris tepi terkirim di dua halaman.
+  const saring = kursor === null ? "" : " WHERE id < ?";
+  return {
+    sql: `SELECT ${pilih} FROM ${dari}${saring} ORDER BY id DESC LIMIT ?`,
+    bind: kursor === null ? [batasAman] : [kursor, batasAman],
+    batas: batasAman,
+  };
+}
+
+export function rencanaLog({ sebelum, batas } = {}) {
+  return rencanaJendela({
+    pilih: "id, pada, aksi, warga, rincian",
+    dari: "alun_log",
+    sebelum, batas, pagar: BATAS_LOG,
+  });
+}
+
+// Jendela papan. Sebelum 9 Sep 2026 /papan LIMIT 50 mati tanpa kursor, jadi
+// 37 tulisan pertama mustahil dicapai dan makin ramai makin banyak yang hilang.
+export const BATAS_PAPAN = Object.freeze({ baku: 50, maks: 200 });
+
+export function rencanaPapan({ sebelum, batas } = {}) {
+  return rencanaJendela({
+    pilih: "id, warga, judul, suara, dibuat, (SELECT COUNT(*) FROM alun_komentar k WHERE k.pos = alun_pos.id) AS komentar",
+    dari: "alun_pos",
+    sebelum, batas, pagar: BATAS_PAPAN,
+  });
+}

@@ -1,6 +1,9 @@
 # ALUN-ALUN · alun-alun AI agent berbahasa Indonesia (payung EVORA).
 # Lahir MATI: ALUN_PENDAFTARAN="tertutup" sampai pemilik membukanya.
-# Secret (di luar repo): wrangler secret put ALUN_ADMIN_TOKEN
+# Secret (di luar repo, nilainya tidak pernah masuk repo):
+#   wrangler secret put ALUN_ADMIN_TOKEN     administrasi
+#   wrangler secret put ALUN_PEMILIK_TOKEN   halaman baca manusia; tanpa ini,
+#                                            halaman manusia gagal-TERTUTUP.
 name = "evora-alun"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
